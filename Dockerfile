@@ -1,20 +1,15 @@
 FROM alpine:latest AS builder
 
-# 直接获取最新版本号
+# 所有构建步骤放在一个 RUN 指令中，确保变量在同一个 shell 会话中传递
 RUN set -eux && \
     NGINX_VERSION=$(wget -q -O - https://nginx.org/en/download.html | grep -oE 'nginx-[0-9]+\.[0-9]+\.[0-9]+' | head -n1 | cut -d'-' -f2) && \
     ZSTD_VERSION=$(wget -q -O - https://github.com/facebook/zstd/releases/latest | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n1 | cut -c2-) && \
     CORERULESET_VERSION=$(wget -q -O - https://api.github.com/repos/coreruleset/coreruleset/releases/latest | grep -oE '"tag_name": "[^"]+' | cut -d'"' -f4 | sed 's/v//') && \
     echo "NGINX_VERSION=${NGINX_VERSION}" > /tmp/versions.txt && \
     echo "ZSTD_VERSION=${ZSTD_VERSION}" >> /tmp/versions.txt && \
-    echo "CORERULESET_VERSION=${CORERULESET_VERSION}" >> /tmp/versions.txt
-
-# 设置环境变量，使其在后续 RUN 命令中可用
-ENV NGINX_VERSION=${NGINX_VERSION}
-ENV ZSTD_VERSION=${ZSTD_VERSION}
-ENV CORERULESET_VERSION=${CORERULESET_VERSION}
-
-RUN set -eux && \
+    echo "CORERULESET_VERSION=${CORERULESET_VERSION}" >> /tmp/versions.txt && \
+    # 安装依赖
+    set -eux && \
     apk add --no-cache --no-scripts --virtual .build-deps \
     pcre-dev \
     zlib-dev \
@@ -35,46 +30,39 @@ RUN set -eux && \
     libtool \
     pkgconfig \
     linux-headers \
-    pcre2-dev
-
-WORKDIR /usr/src
-
-# Download NGINX
-RUN wget https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz \
-    && tar -zxf nginx-${NGINX_VERSION}.tar.gz
-
-# Clone Brotli module
-RUN git clone --recurse-submodules -j8 https://github.com/google/ngx_brotli
-
-RUN git clone --depth 1 -b v3.0.14 https://github.com/owasp-modsecurity/ModSecurity.git \
-    && cd ModSecurity \
-    && git submodule init \
-    && git submodule update \
-    && ./build.sh \
-    && ./configure CXXFLAGS="-include cstdint" \
-    && make -j$(nproc) \
-    && make install \
-    && cd .. \
-    && rm -rf ModSecurity
-
-# Clone ModSecurity-nginx connector
-# 最新稳定发布：v1.0.4（2025 年 5 月发布）
-RUN git clone --depth 1 -b v1.0.4 https://github.com/owasp-modsecurity/ModSecurity-nginx.git
-
-
-# Download and build Zstandard
-RUN wget https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz \
-    && tar -xzf zstd-${ZSTD_VERSION}.tar.gz \
-    && cd zstd-${ZSTD_VERSION} \
-    && make clean \
-    && CFLAGS="-fPIC" make && make install \
-    && cd ..
-
-# Clone Zstandard NGINX module
-RUN git clone --depth=10 https://github.com/tokers/zstd-nginx-module.git
-
-# Configure and build NGINX with modules
-RUN cd nginx-${NGINX_VERSION} && \
+    pcre2-dev && \
+    # 设置工作目录
+    mkdir -p /usr/src && \
+    cd /usr/src && \
+    # Download NGINX
+    wget https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz && \
+    tar -zxf nginx-${NGINX_VERSION}.tar.gz && \
+    # Clone Brotli module
+    git clone --recurse-submodules -j8 https://github.com/google/ngx_brotli && \
+    # Clone and build ModSecurity
+    git clone --depth 1 -b v3.0.14 https://github.com/owasp-modsecurity/ModSecurity.git && \
+    cd ModSecurity && \
+    git submodule init && \
+    git submodule update && \
+    ./build.sh && \
+    ./configure CXXFLAGS="-include cstdint" && \
+    make -j$(nproc) && \
+    make install && \
+    cd .. && \
+    rm -rf ModSecurity && \
+    # Clone ModSecurity-nginx connector
+    git clone --depth 1 -b v1.0.4 https://github.com/owasp-modsecurity/ModSecurity-nginx.git && \
+    # Download and build Zstandard
+    wget https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz && \
+    tar -xzf zstd-${ZSTD_VERSION}.tar.gz && \
+    cd zstd-${ZSTD_VERSION} && \
+    make clean && \
+    CFLAGS="-fPIC" make && make install && \
+    cd .. && \
+    # Clone Zstandard NGINX module
+    git clone --depth=10 https://github.com/tokers/zstd-nginx-module.git && \
+    # Configure and build NGINX with modules
+    cd nginx-${NGINX_VERSION} && \
     ./configure --with-compat \
                 --add-dynamic-module=../ngx_brotli \
                 --add-dynamic-module=../ModSecurity-nginx \
@@ -89,13 +77,14 @@ FROM nginx:alpine
 
 # 从 builder 阶段复制版本号信息和编译好的模块
 COPY --from=builder /tmp/versions.txt /tmp/versions.txt
-COPY --from=builder /usr/src/nginx-${NGINX_VERSION}/objs/*.so /etc/nginx/modules/
+COPY --from=builder /usr/src /usr/src
 COPY --from=builder /usr/local/modsecurity/lib/* /usr/lib/
 
-# 读取版本号
-RUN set -eux && \
-    NGINX_VERSION=$(grep NGINX_VERSION /tmp/versions.txt | cut -d'=' -f2) && \
+# 所有配置步骤放在一个 RUN 指令中
+RUN NGINX_VERSION=$(grep NGINX_VERSION /tmp/versions.txt | cut -d'=' -f2) && \
     CORERULESET_VERSION=$(grep CORERULESET_VERSION /tmp/versions.txt | cut -d'=' -f2) && \
+    # 复制编译好的模块
+    cp -r /usr/src/nginx-${NGINX_VERSION}/objs/*.so /etc/nginx/modules/ && \
     # 创建配置目录并下载必要文件
     mkdir -p /etc/nginx/modsec/plugins && \
     wget https://github.com/coreruleset/coreruleset/archive/v${CORERULESET_VERSION}.tar.gz && \
@@ -129,4 +118,4 @@ RUN set -eux && \
     yajl-dev && \
     ldconfig /usr/lib && \
     wget https://raw.githubusercontent.com/owasp-modsecurity/ModSecurity/v3/master/unicode.mapping -O /etc/nginx/modsec/unicode.mapping && \
-    rm -rf /var/cache/apk/*
+    rm -rf /var/cache/apk/* /usr/src
