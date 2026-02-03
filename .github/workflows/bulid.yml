@@ -1,0 +1,183 @@
+name: nginx-waf-docker Docker Image CI/CD Pipeline
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+  # schedule:
+  #   - cron: '0 3 * * *' # 每天构建一次（可选）
+  # schedule:
+  #   - cron: '0 3 * * 1' # 每周一构建一次 (例如，每周一凌晨3点)
+
+# 明确设置权限，避免fork仓库的权限问题
+permissions:
+  contents: read
+  packages: write  # 推送镜像到GitHub Container Registry所需权限
+  security-events: write
+  # 允许删除 GitHub Actions 缓存
+  actions: write
+
+env:
+  IMAGE_NAME: nginx-waf
+  # DOCKER_REPO: bailangvvking/go-wrk
+  IMAGE_TAG: latest
+  GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+
+# 在jobs中使用的时候动态拼接DOCKER_REPO
+
+jobs:
+  build-and-push:
+    name: Build and Push Docker Image
+    runs-on:
+      # ubuntu-latest
+      - self-hosted
+      - linux
+      - x64
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # - name: Cache Clean
+      #   # 使用 || true 允许命令在没有缓存时返回0退出码
+      #   run: gh cache delete --all || true
+      - name: Comprehensive Cache Clean
+        # 更彻底的缓存清理，包括所有类型的缓存
+        run: |
+          echo "===清理GitHub Actions缓存==="
+          gh cache delete --all || true
+          
+          echo "===清理Docker Buildx缓存==="
+          docker buildx prune -f || true
+          
+          echo "===清理Docker镜像和容器==="
+          docker system prune -af || true
+          
+          echo "===清理Trivy缓存==="
+          rm -rf ~/.cache/trivy || true
+          docker volume rm $(docker volume ls -q | grep trivy) 2>/dev/null || true
+          
+          echo "===缓存清理完成==="
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create multi-core Buildx builder
+        run: |
+          # 检查并删除已存在的构建器
+          if docker buildx inspect multi-core-builder >/dev/null 2>&1; then
+            echo "Builder multi-core-builder exists, removing it..."
+            docker buildx rm multi-core-builder
+          fi
+          # 创建一个使用多核的构建器
+          docker buildx create --name multi-core-builder --driver docker-container --use \
+            --driver-opt "image=moby/buildkit:latest" \
+            --buildkitd-flags "--debug"
+          # 验证构建器
+          docker buildx inspect --bootstrap
+
+      # - name: Log in to DockerHub
+      #   uses: docker/login-action@v3
+      #   with:
+      #     username: ${{ secrets.DOCKERHUB_USERNAME }}
+      #     password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # - name: Build and push Docker image
+      - name: Build Docker image (no push yet)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          # 使用新创建的多核心构建器
+          builder: multi-core-builder
+          # platforms: |
+          #     linux/amd64
+          #     linux/386
+          #     linux/arm64
+          #     linux/arm/v7
+          #     linux/arm/v6
+          #     linux/arm/v5
+          #     linux/riscv64
+          #     linux/ppc64le
+          #     linux/mips64le
+          #     linux/s390x
+          # platforms: |
+          #     linux/386
+          #     linux/amd64
+          #     linux/arm/v6
+          #     linux/arm/v7
+          #     linux/arm64/v8
+          # platforms: |
+          #     linux/amd64
+          #     linux/arm64
+          #     linux/arm/v6
+          #     linux/arm/v7
+          platforms: |
+              linux/amd64
+          # push: true
+          push: false
+          load: true  # 添加这一行，将镜像加载到本地
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          # 禁用缓存，确保每次构建都是全新的
+          cache: false
+        env:
+          # 控制 QEMU 使用多核
+          QEMU_CPU: max
+          # 控制 BuildKit 使用多核
+          BUILDKIT_MULTI_PLATFORM: 1
+
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push Docker image
+        run: |
+          docker images
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+
+      - name: Output image info
+        run: |
+          echo "Image built and pushed successfully"
+          echo "Repository: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
+          echo "Tag: ${{ env.IMAGE_TAG }}"
+
+      - name: Comprehensive Vulnerability Scan
+        if: github.event_name != 'pull_request'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          # 启用全面扫描
+          scan-type: 'image'
+          vuln-type: 'os,library'  # 扫描操作系统包和应用程序依赖
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN'  # 扫描所有严重级别
+          ignore-unfixed: false  # 不忽略未修复的漏洞
+          
+          # 启用深度扫描选项
+          security-checks: 'vuln,config,secret,license'  # 扫描漏洞、配置、密钥、许可证
+          
+          # 启用详细日志
+          debug: true
+          
+          # 数据库更新设置
+          skip-db-update: false  # 每次扫描都更新漏洞数据库
+          skip-java-db-update: false
+
+      - name: Upload Trivy scan results
+        if: github.event_name != 'pull_request' && github.event_name != 'schedule'
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: 'trivy-results.sarif'
+          category: 'container-vulnerability-scan'
+
+      - name: Display scan summary
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "===漏洞扫描结果摘要==="
+          echo "请查看安全选项卡获取详细的Trivy扫描结果"
+          echo "扫描结果已上传到GitHub Security选项卡"
