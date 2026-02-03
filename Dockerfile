@@ -57,7 +57,9 @@ RUN set -eux && \
     tar -xzf zstd-${ZSTD_VERSION}.tar.gz && \
     cd zstd-${ZSTD_VERSION} && \
     make clean && \
-    CFLAGS="-fPIC" make && make install && \
+    # CFLAGS="-fPIC" make && make install && \
+    # 多核并行编译
+    CFLAGS="-fPIC" make -j$(nproc) && make install && \
     cd .. && \
     # Clone Zstandard NGINX module
     git clone --depth=10 https://github.com/tokers/zstd-nginx-module.git && \
@@ -67,13 +69,15 @@ RUN set -eux && \
                 --add-dynamic-module=../ngx_brotli \
                 --add-dynamic-module=../ModSecurity-nginx \
                 --add-dynamic-module=../zstd-nginx-module && \
-    make modules
+    # make modules
+    # 多核并行编译
+    make -j$(nproc) modules
 
 
 
 
 
-FROM nginx:alpine
+FROM nginx:alpine AS final
 
 # 从 builder 阶段复制版本号信息和编译好的模块
 COPY --from=builder /tmp/versions.txt /tmp/versions.txt
