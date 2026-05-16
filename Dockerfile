@@ -1,6 +1,6 @@
 FROM alpine:latest AS builder
 
-# 所有构建步骤放在一个 RUN 指令中，确保变量在同一个 shell 会话中传递
+# 所有构建步骤放在一个 RUN 指令中，确保变量在同一个 shell 会话中传递 
 RUN NGINX_VERSION=$(wget -q -O - https://nginx.org/en/download.html | grep -oE 'nginx-[0-9]+\.[0-9]+\.[0-9]+' | head -n1 | cut -d'-' -f2) && \
     ZSTD_VERSION=$(wget -q -O - https://github.com/facebook/zstd/releases/latest | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n1 | cut -c2-) && \
     CORERULESET_VERSION=$(wget -q -O - https://api.github.com/repos/coreruleset/coreruleset/releases/latest | grep -oE '"tag_name": "[^"]+' | cut -d'"' -f4 | sed 's/v//') && \
